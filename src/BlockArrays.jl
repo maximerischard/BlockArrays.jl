@@ -8,7 +8,7 @@ export Block, getblock, getblock!, setblock!, nblocks, blocksize, blockcheckboun
 
 export BlockArray, BlockMatrix, BlockVector, BlockVecOrMat
 export PseudoBlockArray, PseudoBlockMatrix, PseudoBlockVector, PseudoBlockVecOrMat
-export BlockTridiagMatrix
+export BlockTridiagMatrix, SymmBlockTridiagMatrix
 
 import Base: @propagate_inbounds, Array
 using Base.Cartesian

@@ -65,7 +65,8 @@ end
 
 function BlockTridiagMatrix{T, R <: AbstractMatrix{T}}(::Type{R}, block_sizes::BlockSizes{2})
     n_blocks = nblocks(block_sizes)
-    n_blocks[1] == n_blocks[2] || throw("expect same number of blocks in both dimensions")
+    n_blocks[1] == n_blocks[2] || throw(DimensionMismatch(
+            "expect same number of blocks in both dimensions"))
     diagl = Vector{R}(n_blocks[1])
     lower = Vector{R}(n_blocks[1]-1)
     upper = Vector{R}(n_blocks[1]-1)
@@ -179,7 +180,10 @@ end
 
 function _check_setblock!(bltrid_mat::BlockTridiagMatrix, v, i::Int, j::Int)
     if size(v) != blocksize(bltrid_mat, i, j)
-        throw(DimensionMismatch(string("tried to assign $(size(v)) array to ", blocksize(bltrid_mat, i, j), " block")))
+        throw(DimensionMismatch(
+                string("tried to assign $(size(v)) array to ",
+                       blocksize(bltrid_mat, i, j),
+                       " block")))
     end
 end
 
@@ -231,6 +235,287 @@ end
 
 function Base.copy!{T, R<:AbstractArray{T}, M<:AbstractArray{T}
                    }(bltrid_mat::BlockTridiagMatrix{T, R}, arr::M)
+    block_sizes = bltrid_mat.block_sizes
+    row_blocks, col_blocks = nblocks(bltrid_mat)
+    for brow in 1:row_blocks
+        for bcol in max(1,brow-1):min(brow+1,col_blocks)
+            indices = globalrange(block_sizes, (brow,bcol))
+            copy!(getblock(bltrid_mat, brow, bcol), view(arr, indices...))
+        end
+    end
+    return bltrid_mat
+end
+
+#=======================
+ SymmBlockTridiagMatrix
+=======================#
+
+"""
+    SymmBlockTridiagMatrix{T, R <: AbstractMatrix{T}} <: AbstractBlockArray{T, N}
+
+A `SymmBlockTridiagMatrix` is a block tridiagonal matrix where each block is stored contiguously.
+This means that insertions and retrieval of blocks
+can be very fast and non allocating since no copying of data is needed.
+
+In the type definition, `R` defines the array type that each block has,
+for example `Matrix{Float64}.
+"""
+struct SymmBlockTridiagMatrix{T,
+                              RDIAG <: AbstractMatrix{T},
+                              RLOWER <: AbstractMatrix{T}
+                             } <: AbstractBlockMatrix{T}
+    diagl::Vector{RDIAG}
+    lower::Vector{RLOWER}
+    block_sizes::BlockSizes{2}
+    function SymmBlockTridiagMatrix{T,RDIAG,RLOWER}(
+            diagl::Vector{RDIAG}, lower::Vector{RLOWER},
+            block_sizes::BlockSizes{2}
+            ) where {T,
+                     RDIAG <: AbstractMatrix{T},
+                     RLOWER <: AbstractMatrix{T}}
+
+        row_bsizes = block_sizes.cumul_sizes[1]
+        col_bsizes = block_sizes.cumul_sizes[2]
+        row_bsizes == col_bsizes || throw(DimensionMismatch(
+                "SymmBlockTridiagMatrix  should have matching block sizes "
+                *"in both dimensions (rows and columns), "
+                *"but $(row_bsizes) != $(col_bsizes)."))
+        new(diagl, lower, block_sizes)
+    end
+end
+
+# Auxilary outer constructors
+function SymmBlockTridiagMatrix(
+        diagl::Vector{RDIAG}, lower::Vector{RLOWER}, block_sizes::BlockSizes{2}
+        ) where {T,
+                 RDIAG <: AbstractMatrix{T},
+                 RLOWER <: AbstractMatrix{T}}
+
+    return SymmBlockTridiagMatrix{T, RDIAG, RLOWER}(
+            diagl, lower, block_sizes)
+end
+
+function SymmBlockTridiagMatrix(
+        diagl::Vector{RDIAG}, lower::Vector{RLOWER},
+        block_sizes::Vararg{Vector{Int}, 2}
+        ) where {T,
+                 RDIAG <: AbstractMatrix{T},
+                 RLOWER <: AbstractMatrix{T}}
+
+    return SymmBlockTridiagMatrix{T, RDIAG, RLOWER}(
+            diagl, lower, BlockSizes(block_sizes...))
+end
+
+
+################
+# Constructors #
+################
+
+"""
+Constructs a `SymmBlockTridiagMatrix` with uninitialized blocks from a block type `R`
+with sizes defind by `block_sizes`.
+
+```jldoctest
+julia> SymmBlockTridiagMatrix(Matrix{Float64}, [1,3], [2,2])
+2×2-blocked 4×4 BlockArrays.SymmBlockTridiagMatrix{Float64,2,Array{Float64,2}}:
+ #undef  │  #undef  #undef  #undef  │
+ --------┼--------------------------┼
+ #undef  │  #undef  #undef  #undef  │
+ #undef  │  #undef  #undef  #undef  │
+ --------┼--------------------------┼
+ #undef  │  #undef  #undef  #undef  │
+```
+"""
+@inline function SymmBlockTridiagMatrix{
+        T, RDIAG <: AbstractMatrix{T}, RLOWER <: AbstractMatrix{T}
+        }(::Type{RDIAG}, ::Type{RLOWER}, block_sizes::Vararg{Vector{Int}, 2})
+
+    SymmBlockTridiagMatrix(RDIAG, RLOWER, BlockSizes(block_sizes...))
+end
+@inline function SymmBlockTridiagMatrix{
+            T, R <: AbstractMatrix{T}
+            }(::Type{R}, block_sizes::Vararg{Vector{Int}, 2})
+
+    SymmBlockTridiagMatrix(R, R, block_sizes)
+end
+
+function SymmBlockTridiagMatrix{
+        T, RDIAG <: AbstractMatrix{T}, RLOWER <: AbstractMatrix{T}
+        }(::Type{RDIAG}, ::Type{RLOWER}, block_sizes::BlockSizes{2})
+    n_blocks = nblocks(block_sizes)
+    n_blocks[1] == n_blocks[2] || throw("expect same number of blocks in both dimensions")
+    diagl = Vector{RDIAG}(n_blocks[1])
+    lower = Vector{RLOWER}(n_blocks[1]-1)
+    SymmBlockTridiagMatrix{T,RDIAG,RLOWER}(diagl, lower, block_sizes)
+end
+
+function SymmBlockTridiagMatrix(arr::AbstractMatrix,
+                                block_sizes::Vararg{Vector{Int}, 2})
+    for i in 1:2
+        if sum(block_sizes[i]) != size(arr, i)
+            throw(DimensionMismatch(
+                    "block size for dimension $i: $(block_sizes[i])" *
+                    "does not sum to the array size: $(size(arr, i))"))
+        end
+    end
+
+    _block_sizes = BlockSizes(block_sizes...)
+    R = typeof(arr)
+    bltrid_mat = SymmBlockTridiagMatrix(R, R, _block_sizes)
+    row_blocks, col_blocks = nblocks(bltrid_mat)
+    for brow in 1:row_blocks
+        for bcol in max(1,brow-1):min(brow+1,col_blocks)
+            indices = globalrange(_block_sizes, (brow,bcol))
+            setblock!(bltrid_mat, arr[indices...], brow, bcol)
+        end
+    end
+
+    return bltrid_mat
+end
+
+################################
+# AbstractBlockArray Interface #
+################################
+@inline nblocks(bltrid_mat::SymmBlockTridiagMatrix) = nblocks(bltrid_mat.block_sizes)
+@inline blocksize(bltrid_mat::SymmBlockTridiagMatrix, i::Int, j::Int) = blocksize(bltrid_mat.block_sizes, (i, j))
+
+@inline function getblock(bltrid_mat::SymmBlockTridiagMatrix, i::Int, j::Int)
+    @boundscheck blockcheckbounds(bltrid_mat, i, j)
+    if i==j
+        # for blocks on the diagonal,
+        # get the block from `diagl`
+        return bltrid_mat.diagl[i]
+    elseif i==j+1
+        # for blocks below the diagonal,
+        # get the block from `lower`
+        return bltrid_mat.lower[j]
+    elseif i+1==j
+        # for blocks above the diagonal,
+        # get the mirror block from `lower`
+        return transpose(getblock(bltrid_mat, j, i))
+    else
+        # otherwise return a freshly-baked
+        # matrix of zeros (with a warning
+        # because that's dumb)
+        warn(@sprintf("""The (%d,%d) block of a block tridiagonal matrix
+                         is just zeros. It's wasteful to obtain this block.
+                         """, i, j),
+             once=true,
+             key="blocktridiagonal_inefficient_getblock")
+        return zeros(eltype(bltrid_mat), blocksize(bltrid_mat, i,  j))
+    end
+end
+
+@inline function Base.getindex(bltrid_mat::SymmBlockTridiagMatrix, blockindex::BlockIndex{2})
+    block_i, block_j = blockindex.I
+    @boundscheck blockcheckbounds(bltrid_mat, block_i, block_j)
+    if abs(block_i-block_j) > 1
+        return zero(eltype(bltrid_mat))
+    end
+    @inbounds block = getblock(bltrid_mat, blockindex.I...)
+    @boundscheck checkbounds(block, blockindex.α...)
+    @inbounds v = block[blockindex.α...]
+    return v
+end
+
+
+###########################
+# AbstractArray Interface #
+###########################
+
+@inline function Base.similar{T2}(bltrid_mat::SymmBlockTridiagMatrix,
+                                    ::Type{T2})
+    diagl = bltrid_mat.diagl
+    lower = bltrid_mat.lower
+    SymmBlockTridiagMatrix(similar(diagl, Matrix{T2}),
+                           similar(lower, Matrix{T2}),
+                           copy(bltrid_mat.block_sizes))
+end
+
+function Base.size(arr::SymmBlockTridiagMatrix)
+    return (arr.block_sizes[1][end]-1,
+            arr.block_sizes[2][end]-1)
+end
+
+@inline function Base.getindex(bltrid_mat::SymmBlockTridiagMatrix, i::Vararg{Int, 2})
+    @boundscheck checkbounds(bltrid_mat, i...)
+    @inbounds v = bltrid_mat[global2blockindex(bltrid_mat.block_sizes, i)]
+    return v
+end
+
+@inline function Base.setindex!(bltrid_mat::SymmBlockTridiagMatrix, v, i::Vararg{Int, 2})
+    @boundscheck checkbounds(bltrid_mat, i...)
+    @inbounds bltrid_mat[global2blockindex(bltrid_mat.block_sizes, i)] = v
+    return bltrid_mat
+end
+
+############
+# Indexing #
+############
+
+function _check_setblock!(bltrid_mat::SymmBlockTridiagMatrix, v, i::Int, j::Int)
+    if size(v) != blocksize(bltrid_mat, i, j)
+        throw(DimensionMismatch(string("tried to assign $(size(v)) array to ", blocksize(bltrid_mat, i, j), " block")))
+    end
+end
+
+
+@inline function setblock!(bltrid_mat::SymmBlockTridiagMatrix, v, i::Int, j::Int)
+    @boundscheck blockcheckbounds(bltrid_mat, i, j)
+    @boundscheck _check_setblock!(bltrid_mat, v, i, j)
+    @inbounds begin
+        if i==j
+            # for blocks on the diagonal,
+            # get the block from `diagl`
+            bltrid_mat.diagl[i] = v
+        elseif i==j+1
+            # for blocks below the diagonal,
+            # get the block from `lower`
+            bltrid_mat.lower[j] = v
+        elseif i+1==j
+            # for blocks above the diagonal,
+            # write the transpose to the lower
+            # diagonal
+            warn("""Writing to the upper diagonal requires a transpose
+                    operation. It is more efficient to write
+                    to the lower diagonal.
+                     """,
+                 once=true,
+                 key="symmblocktridiagonal_inefficient_setblock")
+            setblock!(bltrid_mat, transpose(v), j, i)
+        else
+            throw("tried to set zero block of SymmBlockTridiagMatrix")
+        end
+    end
+    return bltrid_mat
+end
+
+@propagate_inbounds function Base.setindex!{T,N}(bltrid_mat::SymmBlockTridiagMatrix{T, N}, v, block_index::BlockIndex{N})
+    getblock(bltrid_mat, block_index.I...)[block_index.α...] = v
+end
+
+########
+# Misc #
+########
+
+# need to think about this
+function Base.Array(bltrid_mat::SymmBlockTridiagMatrix{T}) where {T}
+    # TODO: This will fail for empty block array
+    block_sizes = bltrid_mat.block_sizes
+    row_blocks, col_blocks = nblocks(bltrid_mat)
+    arr = zeros(T, size(bltrid_mat))
+    for brow in 1:row_blocks
+        for bcol in max(1,brow-1):min(brow+1,col_blocks)
+            indices = globalrange(block_sizes, (brow,bcol))
+            arr[indices...] = getblock(bltrid_mat, brow, bcol)
+        end
+    end
+    return arr
+end
+
+function Base.copy!{T}(bltrid_mat::SymmBlockTridiagMatrix{T},
+                       arr::AbstractArray{T})
+
     block_sizes = bltrid_mat.block_sizes
     row_blocks, col_blocks = nblocks(bltrid_mat)
     for brow in 1:row_blocks
